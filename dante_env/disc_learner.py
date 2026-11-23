@@ -8,11 +8,12 @@ Differences to learner A (everything else is inherited):
               At the start f_bar = 0.
   * f update: after every batch of M rollouts, the discriminator best-responds to the current learner:
                 f_new(s,a) = sign( mu_E(s,a) - mu_pi(s,a) )
-              mu_E  = (s,a) frequencies of N_E expert demonstrations (generated ONCE, with the environment's tremble,
-                      free: not counted as interactions),
+              mu_E  = (s,a) frequencies of N_E expert demonstrations (generated ONCE, TREMBLE-FREE like the expert's
+                      visitation rho_E^t that the expert resets use; free: not counted as interactions),
               mu_pi = (s,a) frequencies of the learner's rollouts in this batch.
               f_bar = running mean of all f_new  (follow-the-leader on the discriminator side, as in FILTER).
-  * the noise from the finite number N_E of demonstrations and from the finite batch is what produces per-step error.
+  * noise: with a deterministic, tremble-free expert all demonstrations are identical, so mu_E is exact and N_E has no
+    effect; the per-step error of the discriminator comes from the finite batch estimate of mu_pi.
 Settings you may change: N_E (n_demos), rollouts_per_iter M.
 """
 import numpy as np
@@ -27,8 +28,18 @@ class DiscFilterLearner(FilterLearner):
         self.batch = np.zeros((env.nS, env.nA))
         self.mu_E = self._expert_freq(n_demos)
 
+    @staticmethod
+    def _tremble_attr(env):
+        for name in ("p", "p_tremble"):
+            if hasattr(env, name):
+                return name
+        raise AttributeError("env needs a tremble attribute called 'p' or 'p_tremble' to generate tremble-free demos")
+
     def _expert_freq(self, n_demos):
         env, n0 = self.env, self.env.n_interactions
+        name = self._tremble_attr(env)
+        p_saved = getattr(env, name)
+        setattr(env, name, 0.0)            # demonstrations are tremble-free
         pi_E, cnt = env.expert_policy(), np.zeros((env.nS, env.nA))
         for _ in range(n_demos):
             s = env.reset()
@@ -37,6 +48,7 @@ class DiscFilterLearner(FilterLearner):
                 a = int(self.rng.choice(env.nA, p=pi_E[s]))
                 cnt[s, a] += 1
                 s, _, done = env.step(a)
+        setattr(env, name, p_saved)        # restore tremble for learning
         env.n_interactions = n0            # demonstrations are free
         env.reset()
         return cnt / cnt.sum()

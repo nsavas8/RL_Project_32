@@ -8,9 +8,12 @@ DANTE (Swamy et al. 2023, Fig. 2 / Sec. 3.2): three rows, actions stay / up / do
   reward   1 whenever the NEXT state is not the bottom row   (goal: stay in the top two rows) -> Vmax = T
   tremble  with prob p the executed action is uniformly random (as p_tremble in Sec. 5 of the paper)
   expert   demonstrations (tremble-free) only ever visit the center row:  rho_E^t = {center}.
-           expert_policy() is the optimal policy used for J(pi_E): stay in center/top, UP from the bottom row.
-           (The demos do not show the recovery move; it is defined only so that the gap is to an achievable value.
-            Same convention as expert_policy() in the far-start environment.)
+           expert_policy(): stay in center/top, UP from the bottom row (the demos never show the recovery move).
+  gap      measured to the OPTIMAL value J* (exact dynamic programming, WITH tremble), not to the expert, because under
+           tremble the center-row expert is not optimal (the top row is safer: from the top a slip never costs reward).
+           In the far-start environment the expert is optimal, so there "gap to expert" = "gap to optimal"; this makes both
+           environments use the same definition:   gap(pi) = J*(p) - J(pi; p).
+           optimal_value() = J*,  expert_value() = J(pi_E; p),  both with the environment's tremble p.
 """
 import math
 import random
@@ -88,7 +91,24 @@ class DanteEnv:
 
     @property
     def vmax(self):
+        """V_max = J(expert, no tremble) = T (same definition as in the far-start environment); only used to normalise."""
         return self.evaluate(self.expert_policy(), p_tremble=0.0)
+
+    def optimal_value(self, p_tremble=None):
+        """J*: optimal expected return from s0 with tremble p, by backward dynamic programming (exact, free)."""
+        p = self.p if p_tremble is None else p_tremble
+        P = self._P()
+        R = np.array([[float(self.reward(self.next_state(s, a))) for a in range(3)] for s in range(3)])   # r(s, executed a)
+        eff = (1 - p) * np.eye(3) + p / 3                  # eff[a, a'] = P(executed a' | chosen a)
+        V = np.zeros(3)
+        for _ in range(self.T):
+            Qexec = R + np.einsum("san,n->sa", P, V)        # value of EXECUTING a' in s
+            Q = Qexec @ eff.T                               # value of CHOOSING a in s
+            V = Q.max(axis=1)
+        return V[self.s0]
+
+    def expert_value(self, p_tremble=None):
+        return self.evaluate(self.expert_policy(), p_tremble)
 
 
 # ============================== sampled MMDP (Alg. 3) on DANTE ==============================
@@ -99,7 +119,7 @@ def run_mmdp(T, M, cls, seed, p_tremble=0.05):
     Reward class of the moment-matching game:
       'sym' : F = {r, -r} (closed under negation, the paper's assumption)  -> pi_t = argmin_a |Qhat(expert action) - Qhat(a)|
       'one' : F = {r}     (not closed under negation, as in Cliff)         -> pi_t = argmax_a Qhat(a)   (= PSDP)
-    Returns (interactions, gap = J(pi_E) - J(pi)). Cost is exactly M*T*(T+1)/2 interactions."""
+    Returns (interactions, gap to J*, gap to the expert). Cost is exactly M*T*(T+1)/2 interactions."""
     env, rng = DanteEnv(T, p_tremble, seed), random.Random(f"dmmdp-{T}-{M}-{cls}-{seed}")
     pis = {}
     for t in range(T - 1, -1, -1):
@@ -123,5 +143,5 @@ def run_mmdp(T, M, cls, seed, p_tremble=0.05):
         pi[CENTER] = pis[t]
         return pi
 
-    J_E = env.evaluate(env.expert_policy())
-    return env.n_interactions, J_E - env.evaluate_timed(pi_of_t)
+    J = env.evaluate_timed(pi_of_t)
+    return env.n_interactions, env.optimal_value() - J, env.expert_value() - J
